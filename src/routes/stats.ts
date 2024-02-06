@@ -5,7 +5,7 @@ const router = express.Router();
 
 router.route('/:username').get(async (req, res) => {
     const username = req.params.username;
-    const stats = await github.retriveStreakStats(username);
+    const stats = await github.getStreakStats(username);
     res.status(200).json(stats);
 })
 

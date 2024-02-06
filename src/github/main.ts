@@ -1,10 +1,22 @@
-import { ContributionGraph, fetchContributedYears, fetchContributionGraph } from "./graphql";
+import { ContributionGraph, fetchContributionGraph, fetchContributedYears } from './graphql';
+import flatCache from 'flat-cache';
+import path from 'path';
+import enhancedCache from '../utils/cache';
+const currentYearContributionCachingSecs = 7200;
 
-export const fetchContributions = async (username: string, contibutionYears: number[]) => {
+/**
+ * Fetch user contribution calendars for provided years
+ */
+export const fetchContributions = async (
+  username: string,
+  contributionYears: number[],
+  cache: any,
+) => {
   let allContributions: Contributions | undefined = undefined;
 
   const now = new Date();
   const today = now.toISOString().split('T')[0];
+  const currentYear = now.getFullYear();
   const tomorrowDate = new Date(today);
   tomorrowDate.setDate(tomorrowDate.getDate() + 1);
   const tomorrow = now.toISOString().split('T')[0];
@@ -12,29 +24,44 @@ export const fetchContributions = async (username: string, contibutionYears: num
   const manyContributions: Contributions[] = [];
   const yearsToFetch: number[] = [];
 
-  for (const contributionYear of contibutionYears) {
-    yearsToFetch.push(contributionYear);
+  // -- grab year's contributions from cache
+  for (const contributionYear of contributionYears) {
+    const cacheKey = `contributions_${contributionYear}`;
+    const cachedContributions = enhancedCache(cache).get(cacheKey) || cache.getKey(cacheKey);
+
+    if (!cachedContributions) {
+      yearsToFetch.push(contributionYear);
+      continue;
+    }
+
+    manyContributions.push(cachedContributions);
   }
+
+  // -- fetch remaining year's contributions in concurrently
   const fetchContributionGraphRequests = yearsToFetch
     .slice()
     .map((year) => fetchContributionGraph(username, year));
-
   const fetchContributionGraphRes = await Promise.all(fetchContributionGraphRequests);
-
   let i = 0;
-
   for (const graph of fetchContributionGraphRes) {
     if (!graph) {
       continue;
     }
 
     const contributionYear = yearsToFetch[i];
+    const isPermanentCacheable = contributionYear != currentYear;
     const contributions = parseContributionGraph(graph);
+
+    if (isPermanentCacheable && contributions) {
+      const cacheKey = `contributions_${contributionYear}`;
+      cache.setKey(cacheKey, contributions);
+    }
 
     contributions && manyContributions.push(contributions);
     i++;
   }
 
+  // flatten all contributions to a single object
   for (const contributions of manyContributions) {
     let hasAlreadyCommitted = false;
     let lastCommitDate: string | undefined = undefined;
@@ -60,45 +87,43 @@ export const fetchContributions = async (username: string, contibutionYears: num
 
     if (hasAlreadyCommitted) {
       const contributionYear = parseInt(lastCommitDate?.split?.('-')?.[0] || '');
+      const cacheKey = `contributions_${contributionYear}`;
 
+      if (contributionYear && !enhancedCache(cache).get(cacheKey)) {
+        enhancedCache(cache).set(cacheKey, contributions, currentYearContributionCachingSecs);
+      }
     }
   }
+
   return allContributions;
-}
+};
 
-export const retriveStreakStats = async (username: string) => {
-  let contributionYears: number[] = [];
-  const cachedContributionYears = [];
-  const currentYear = new Date().getFullYear();
-  contributionYears = (await fetchContributedYears(username)) ?? [];
+/**
+ * Transform GitHub contribution graph to contributions object
+ */
+const parseContributionGraph = (graph?: ContributionGraph) => {
+  if (!graph) return undefined;
 
-  contributionYears.sort((a, b) => a - b);
-
-  const contributions = await fetchContributions(username, contributionYears);
-
-  if (contributionYears.length == 0 || !contributions) {
-    return {
-      totalContributions: 0,
-      firstContribution: null,
-      longestStreak: {
-        start: null,
-        end: null,
-        days: 0,
-      },
-      currentStreak: {
-        start: null,
-        end: null,
-        days: 0,
-      },
-    };
+  let contributions: Contributions | undefined = undefined;
+  for (const week of graph.weeks) {
+    for (const contributionDay of week.contributionDays) {
+      const date = contributionDay.date;
+      const count = contributionDay.contributionCount;
+      if (!contributions) {
+        contributions = {};
+      }
+      contributions[date] = count;
+    }
   }
-  const stats = extractStreakStats(contributions);
-  return stats;
+  return contributions;
 };
 
-export type Contributions = {
-  [key: string]: number;
-};
+/**
+ * Extract streak stats based on contribution count and dates
+ *
+ * @param contributions
+ * @returns stats
+ */
 export const extractStreakStats = (contributions?: Contributions) => {
   if (!contributions) {
     return undefined;
@@ -165,22 +190,55 @@ export const extractStreakStats = (contributions?: Contributions) => {
   return stats;
 };
 
-const parseContributionGraph = (graph?: ContributionGraph) => {
-  if (!graph) return undefined;
+/**
+ * Fetch and parse github user contribution to obtain streak stats
+ *
+ * @param username
+ * @returns stats
+ */
+export const getStreakStats = async (username: string) => {
+  const cacheDir = path.join(process.cwd(), '.cache/users');
+  const cache = flatCache.load(username, cacheDir);
 
-  let contributions: Contributions | undefined = undefined;
-  for (const week of graph.weeks) {
-    for (const contributionDay of week.contributionDays) {
-      const date = contributionDay.date;
-      const count = contributionDay.contributionCount;
-      if (!contributions) {
-        contributions = {};
-      }
-      contributions[date] = count;
-    }
+  // -- fetch contribution once per year
+  let contributionYears: number[] = [];
+  const cachedContributionYears = cache.getKey('contributionYears') ?? [];
+  const currentYear = new Date().getFullYear();
+  if (!cachedContributionYears || !cachedContributionYears.includes(currentYear)) {
+    contributionYears = (await fetchContributedYears(username)) ?? [];
+    cache.setKey('contributionYears', contributionYears);
+  } else {
+    contributionYears = cachedContributionYears;
   }
-  return contributions;
+  contributionYears.sort((a, b) => a - b);
+
+  const contributions = await fetchContributions(username, contributionYears, cache);
+
+  if (contributionYears.length == 0 || !contributions) {
+    return {
+      totalContributions: 0,
+      firstContribution: null,
+      longestStreak: {
+        start: null,
+        end: null,
+        days: 0,
+      },
+      currentStreak: {
+        start: null,
+        end: null,
+        days: 0,
+      },
+    };
+  }
+
+  const stats = extractStreakStats(contributions);
+
+  // Persist cache
+  cache.save();
+
+  return stats;
 };
+
 export type StreakStats = {
   totalContributions: number;
   firstContribution: string;
@@ -194,4 +252,8 @@ export type StreakStats = {
     end: string;
     days: number;
   };
+};
+
+export type Contributions = {
+  [key: string]: number;
 };

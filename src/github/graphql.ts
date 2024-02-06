@@ -80,9 +80,9 @@ export const fetchContributionGraph = async (
 export type ContributionGraph = {
     totalContributions: number;
     weeks: {
-      contributionDays: {
-        contributionCount: number;
-        date: string;
-      }[];
+        contributionDays: {
+            contributionCount: number;
+            date: string;
+        }[];
     }[];
-  };
+};

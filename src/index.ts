@@ -1,8 +1,9 @@
 import rateLimit from "express-rate-limit";
 import cors from "cors";
-const express = require("express");
-const dotenv = require("dotenv");
+import dotenv from 'dotenv';
 import statsRouter from "./routes/stats";
+import error from './middleware/error';
+import express from 'express';
 
 dotenv.config();
 
@@ -18,6 +19,8 @@ app.use(cors());
 const port = process.env.PORT;
 
 app.use('/stats', statsRouter);
+app.use(error.notFound);
+
 app.listen(port, () => {
   console.log(
     `[server]: Server is running at http://localhost:${port} (${app.get(
